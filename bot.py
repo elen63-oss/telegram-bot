@@ -29,146 +29,35 @@ dp = Dispatcher()
 CONTEST_ENDED = False
 CURRENT_PARTICIPANTS = 0
 
-# ================== БАЗА ДАННЫХ ==================
-async def init_db():
-    """Инициализация базы данных"""
-    async with aiosqlite.connect("contest.db") as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS contest_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
-        
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS participants (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                referrals INTEGER DEFAULT 0,
-                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                referral_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                referrer_id INTEGER,
-                user_id INTEGER UNIQUE,
-                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (referrer_id) REFERENCES participants(user_id)
-            )
-        """)
-        
-        await db.execute(
-            "INSERT OR IGNORE INTO contest_settings (key, value) VALUES (?, ?)",
-            ("contest_ended", "false")
-        )
-        await db.commit()
-
-async def check_contest_status():
-    """Проверка статуса конкурса"""
-    async with aiosqlite.connect("contest.db") as db:
-        cursor = await db.execute(
-            "SELECT value FROM contest_settings WHERE key = 'contest_ended'"
-        )
-        result = await cursor.fetchone()
-        return result and result[0] == "true"
-
-async def end_contest():
-    """Завершение конкурса"""
-    async with aiosqlite.connect("contest.db") as db:
-        await db.execute(
-            "UPDATE contest_settings SET value = 'true' WHERE key = 'contest_ended'"
-        )
-        await db.commit()
-    global CONTEST_ENDED
-    CONTEST_ENDED = True
-    await notify_admin("🏆 Конкурс завершен! Достигнут лимит участников!")
-
 async def get_chat_members_count():
-    """Получение количества участников канала"""
+    """Новый метод получения количества участников"""
     try:
-        channel_username = GROUP_LINK.split('/')[-1].replace('@', '')
+        if GROUP_LINK.startswith("https://t.me/"):
+            channel_username = GROUP_LINK.split('/')[-1]
+        elif GROUP_LINK.startswith("@"):
+            channel_username = GROUP_LINK[1:]
+        else:
+            channel_username = GROUP_LINK
+            
         chat = await bot.get_chat(f"@{channel_username}")
         return await bot.get_chat_member_count(chat.id)
     except Exception as e:
         logger.error(f"Ошибка получения количества участников: {e}")
         return 0
 
-async def check_participants_limit():
-    """Проверка лимита участников"""
-    global CURRENT_PARTICIPANTS, CONTEST_ENDED
-    
-    if CONTEST_ENDED:
-        return True
-        
-    CURRENT_PARTICIPANTS = await get_chat_members_count()
-    
-    if CURRENT_PARTICIPANTS >= MAX_PARTICIPANTS:
-        await end_contest()
-        return True
-        
-    return False
-
-async def add_participant(user: types.User):
-    """Добавление участника"""
-    async with aiosqlite.connect("contest.db") as db:
-        await db.execute(
-            """INSERT OR IGNORE INTO participants 
-               (user_id, username, first_name) 
-               VALUES (?, ?, ?)""",
-            (user.id, user.username, user.first_name)
-        )
-        await db.commit()
-
-async def add_referral(referrer_id: int, user_id: int):
-    """Добавление реферала"""
-    async with aiosqlite.connect("contest.db") as db:
-        await db.execute(
-            "UPDATE participants SET referrals = referrals + 1 WHERE user_id = ?",
-            (referrer_id,)
-        )
-        await db.execute(
-            """INSERT OR IGNORE INTO referrals 
-               (referrer_id, user_id) 
-               VALUES (?, ?)""",
-            (referrer_id, user_id)
-        )
-        await db.commit()
-
-async def get_user_stats(user_id: int) -> dict:
-    """Получение статистики пользователя"""
-    async with aiosqlite.connect("contest.db") as db:
-        cursor = await db.execute(
-            """SELECT referrals FROM participants 
-               WHERE user_id = ?""",
-            (user_id,)
-        )
-        result = await cursor.fetchone()
-        return {"referrals": result[0] if result else 0}
-
-async def get_top_referrers(limit: int = 5) -> list:
-    """Получение топа участников"""
-    async with aiosqlite.connect("contest.db") as db:
-        cursor = await db.execute(
-            """SELECT p.user_id, p.username, p.first_name, p.referrals 
-               FROM participants p
-               ORDER BY p.referrals DESC 
-               LIMIT ?""",
-            (limit,)
-        )
-        return await cursor.fetchall()
-
 async def is_user_subscribed(user_id: int) -> bool:
     """Проверка подписки на канал"""
     try:
-        channel_username = GROUP_LINK.replace("https://", "").replace("t.me/", "").replace("@", "")
-        chat_member = await bot.get_chat_member(
-            chat_id=f"@{channel_username}",
-            user_id=user_id
-        )
-        return chat_member.status in ['member', 'administrator', 'creator']
+        if GROUP_LINK.startswith("https://t.me/"):
+            channel_username = GROUP_LINK.split('/')[-1]
+        elif GROUP_LINK.startswith("@"):
+            channel_username = GROUP_LINK[1:]
+        else:
+            channel_username = GROUP_LINK
+            
+        chat = await bot.get_chat(f"@{channel_username}")
+        member = await bot.get_chat_member(chat.id, user_id)
+        return member.status in ['member', 'administrator', 'creator']
     except Exception as e:
         logger.error(f"Ошибка проверки подписки: {e}")
         return False
