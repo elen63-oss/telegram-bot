@@ -10,5 +10,9 @@ Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
 
+# Ограничения ресурсов
+MemoryLimit=256M
+CPUQuota=80%
+
 [Install]
 WantedBy=multi-user.target
