@@ -3,12 +3,7 @@ import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import (
-    Message, 
-    InlineKeyboardMarkup, 
-    InlineKeyboardButton, 
-    CallbackQuery
-)
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import aiosqlite
 from config import BOT_TOKEN, ADMIN_ID, GROUP_LINK, MAX_PARTICIPANTS
 
@@ -26,13 +21,20 @@ class ContestBot:
         self.dp = Dispatcher()
         self.contest_ended = False
         self.current_participants = 0
+        self.channel_info = None
 
-    @staticmethod
-    def extract_channel_username():
-        """Извлекаем username канала"""
-        if GROUP_LINK.startswith("https://t.me/"):
-            return GROUP_LINK.split('/')[-1].replace('@', '')
-        return GROUP_LINK.replace('@', '')
+    async def initialize(self):
+        """Инициализация бота"""
+        await self.init_db()
+        self.channel_info = await self.get_channel_info()
+        if not self.channel_info:
+            raise Exception("Не удалось получить информацию о канале")
+        
+        # Проверка прав бота
+        me = await self.bot.get_me()
+        bot_member = await self.bot.get_chat_member(self.channel_info['chat_id'], me.id)
+        if bot_member.status not in ['administrator', 'creator']:
+            raise Exception("Бот не является администратором канала!")
 
     async def get_channel_info(self):
         """Получение информации о канале"""
@@ -49,13 +51,19 @@ class ContestBot:
             await self.notify_admin(f"Ошибка доступа к каналу: {str(e)}")
             return None
 
+    @staticmethod
+    def extract_channel_username():
+        """Извлекаем username канала"""
+        if GROUP_LINK.startswith("https://t.me/"):
+            return GROUP_LINK.split('/')[-1].replace('@', '')
+        return GROUP_LINK.replace('@', '')
+
     async def get_chat_members_count(self):
         """Получение количества участников"""
         try:
-            channel_info = await self.get_channel_info()
-            if not channel_info:
+            if not self.channel_info:
                 return 0
-            return await self.bot.get_chat_member_count(channel_info['chat_id'])
+            return await self.bot.get_chat_member_count(self.channel_info['chat_id'])
         except Exception as e:
             logger.error(f"Ошибка подсчета участников: {str(e)}")
             return 0
@@ -63,11 +71,10 @@ class ContestBot:
     async def is_user_subscribed(self, user_id: int) -> bool:
         """Проверка подписки пользователя"""
         try:
-            channel_info = await self.get_channel_info()
-            if not channel_info:
+            if not self.channel_info:
                 return False
                 
-            member = await self.bot.get_chat_member(channel_info['chat_id'], user_id)
+            member = await self.bot.get_chat_member(self.channel_info['chat_id'], user_id)
             return member.status in ['member', 'administrator', 'creator']
         except Exception as e:
             logger.error(f"Ошибка проверки подписки: {str(e)}")
@@ -226,15 +233,10 @@ class ContestBot:
 
     async def notify_admin(self, message: str):
         """Уведомление администратора"""
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                await self.bot.send_message(ADMIN_ID, message)
-                return
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Не удалось отправить уведомление админу: {str(e)}")
-                await asyncio.sleep(2)
+        try:
+            await self.bot.send_message(ADMIN_ID, message)
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление админу: {str(e)}")
 
     async def setup_handlers(self):
         """Настройка обработчиков"""
@@ -243,12 +245,7 @@ class ContestBot:
         async def start(message: Message):
             try:
                 if await self.check_participants_limit():
-                    await message.answer(
-                        "🏆 Конкурс завершен!\n\n"
-                        f"Мы достигли максимального количества участников - {MAX_PARTICIPANTS}!\n"
-                        "Результаты будут объявлены в ближайшее время.\n\n"
-                        "Спасибо за участие! ❤️"
-                    )
+                    await message.answer("Конкурс завершен!")
                     return
 
                 user = message.from_user
@@ -259,171 +256,84 @@ class ContestBot:
                     referrer_id = int(args[1][3:])
                     if referrer_id != user.id:
                         await self.add_referral(referrer_id, user.id)
-                        await self.notify_admin(f"🎉 Новый реферал: {user.first_name}")
 
                 if not await self.is_user_subscribed(user.id):
                     await message.answer(
-                        "📢 Для участия в конкурсе необходимо подписаться на наш канал!\n\n"
-                        f"Осталось свободных мест: {MAX_PARTICIPANTS - self.current_participants}",
+                        "Подпишитесь на канал для участия!",
                         reply_markup=self.get_subscribe_keyboard()
                     )
                     return
 
-                bot_username = (await self.bot.me()).username
-                ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
-                
+                ref_link = f"https://t.me/{(await self.bot.me()).username}?start=ref{user.id}"
                 await message.answer(
-                    f"🏡 <b>Розыгрыш акций ПИК!</b>\n\n"
-                    f"🔗 <b>Ваша реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
-                    f"🏆 <b>Призовой фонд:</b>\n"
-                    f"🥇 1 место: 3 акции ПИК (~1,050 руб)\n"
-                    f"🥈 2 место: 2 акции ПИК (~700 руб)\n"
-                    f"🥉 3 место: 1 акция ПИК (~350 руб)\n\n"
-                    f"📌 <b>Как увеличить шансы:</b>\n"
-                    f"• Приглашайте друзей по своей ссылке\n"
-                    f"• Каждый реферал = +1 балл\n\n"
-                    f"⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - self.current_participants}\n"
-                    f"📅 <b>Итоги конкурса:</b> При достижении {MAX_PARTICIPANTS} участников",
+                    f"Ваша реферальная ссылка: {ref_link}",
                     reply_markup=self.get_main_keyboard()
                 )
 
             except Exception as e:
                 logger.error(f"Ошибка в /start: {str(e)}")
-                await message.answer("⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
+                await message.answer("Произошла ошибка")
 
         @self.dp.callback_query(F.data == "check_sub")
         async def check_subscription(callback_query: CallbackQuery):
             try:
-                user = callback_query.from_user
-                
-                if await self.is_user_subscribed(user.id):
+                if await self.is_user_subscribed(callback_query.from_user.id):
                     await callback_query.message.edit_reply_markup(reply_markup=None)
-                    bot_username = (await self.bot.me()).username
-                    ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
-                    
                     await callback_query.message.answer(
-                        f"✅ <b>{user.first_name}, вы успешно подписаны!</b>\n\n"
-                        "Теперь вы можете участвовать в конкурсе.\n\n"
-                        f"🔗 Ваша реферальная ссылка:\n{ref_link}",
+                        "Вы подписаны!",
                         reply_markup=self.get_main_keyboard()
                     )
-                    await callback_query.answer()
                 else:
-                    await callback_query.answer(
-                        "❌ Вы не подписаны на канал!\n\n"
-                        "1. Нажмите кнопку 'Подписаться на канал'\n"
-                        "2. Подпишитесь на канал\n"
-                        "3. Вернитесь в бот и нажмите 'Проверить подписку'",
-                        show_alert=True
-                    )
+                    await callback_query.answer("Вы не подписаны!", show_alert=True)
             except Exception as e:
                 logger.error(f"Ошибка проверки подписки: {str(e)}")
-                await callback_query.answer(
-                    "⚠️ Ошибка проверки подписки. Пожалуйста, попробуйте позже.",
-                    show_alert=True
-                )
+                await callback_query.answer("Ошибка проверки", show_alert=True)
 
         @self.dp.callback_query(F.data == "my_stats")
         async def show_stats(callback_query: CallbackQuery):
             try:
                 stats = await self.get_user_stats(callback_query.from_user.id)
-                bot_username = (await self.bot.me()).username
-                ref_link = f"https://t.me/{bot_username}?start=ref{callback_query.from_user.id}"
-                
                 await callback_query.message.answer(
-                    f"📊 <b>Ваша статистика:</b>\n\n"
-                    f"👤 ID: <code>{callback_query.from_user.id}</code>\n"
-                    f"👥 Приглашено друзей: <b>{stats['referrals']}</b>\n"
-                    f"🏆 Место в рейтинге: <b>В процессе...</b>\n\n"
-                    f"🔗 <b>Реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
-                    f"⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - self.current_participants}",
+                    f"Ваши рефералы: {stats['referrals']}",
                     reply_markup=self.get_main_keyboard()
                 )
-                await callback_query.answer()
             except Exception as e:
                 logger.error(f"Ошибка показа статистики: {str(e)}")
-                await callback_query.answer("⚠️ Ошибка получения статистики", show_alert=True)
+                await callback_query.answer("Ошибка статистики", show_alert=True)
 
         @self.dp.callback_query(F.data == "top_list")
         async def show_top(callback_query: CallbackQuery):
             try:
                 top_users = await self.get_top_referrers()
-                text = "🏆 <b>Топ участников:</b>\n\n"
-                
-                if top_users:
-                    for i, (uid, username, first_name, refs) in enumerate(top_users, 1):
-                        name = f"@{username}" if username else first_name
-                        text += f"{i}. {name}: <b>{refs}</b> рефералов\n"
-                else:
-                    text = "Пока нет данных о участниках."
-                    
-                text += f"\n⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - self.current_participants}"
-                
-                await callback_query.message.answer(
-                    text,
-                    reply_markup=self.get_main_keyboard()
-                )
-                await callback_query.answer()
+                text = "Топ участников:\n\n"
+                for i, (_, username, first_name, refs) in enumerate(top_users, 1):
+                    name = f"@{username}" if username else first_name
+                    text += f"{i}. {name}: {refs}\n"
+                await callback_query.message.answer(text)
             except Exception as e:
                 logger.error(f"Ошибка показа топа: {str(e)}")
-                await callback_query.answer("⚠️ Ошибка получения топа", show_alert=True)
-
-    async def on_startup(self):
-        """Действия при запуске"""
-        try:
-            # Проверка подключения к API
-            me = await self.bot.get_me()
-            logger.info(f"Бот @{me.username} успешно подключен к API")
-
-            # Проверка канала
-            channel_info = await self.get_channel_info()
-            if not channel_info:
-                error_msg = "Не удалось получить информацию о канале. Проверьте ссылку и права бота."
-                logger.error(error_msg)
-                await self.notify_admin(error_msg)
-                raise Exception(error_msg)
-
-            # Проверка прав бота
-            bot_member = await self.bot.get_chat_member(channel_info['chat_id'], me.id)
-            if bot_member.status not in ['administrator', 'creator']:
-                error_msg = "Бот не является администратором канала!"
-                logger.error(error_msg)
-                await self.notify_admin(error_msg)
-                raise Exception(error_msg)
-
-            # Инициализация БД
-            await self.init_db()
-            
-            # Уведомление админа
-            members_count = await self.get_chat_members_count()
-            await self.notify_admin(
-                "🤖 Бот успешно запущен!\n\n"
-                f"📢 Канал: {GROUP_LINK}\n"
-                f"👥 Участников: {members_count}\n"
-                f"🏆 Лимит: {MAX_PARTICIPANTS}"
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при запуске: {str(e)}")
-            raise
-
-    async def on_shutdown(self):
-        """Действия при выключении"""
-        try:
-            await self.notify_admin("🔴 Бот выключается...")
-        except Exception as e:
-            logger.error(f"Ошибка при выключении: {str(e)}")
-        finally:
-            await self.bot.session.close()
+                await callback_query.answer("Ошибка топа", show_alert=True)
 
     async def run(self):
         """Запуск бота"""
-        await self.on_startup()
-        await self.setup_handlers()
         try:
+            await self.initialize()
+            await self.setup_handlers()
+            
+            me = await self.bot.get_me()
+            logger.info(f"Бот @{me.username} запущен")
+            await self.notify_admin(f"Бот @{me.username} запущен")
+            
             await self.dp.start_polling(self.bot)
+        except Exception as e:
+            logger.error(f"Ошибка запуска: {str(e)}")
+            await self.notify_admin(f"Ошибка запуска: {str(e)}")
         finally:
-            await self.on_shutdown()
+            await self.bot.session.close()
 
 if __name__ == "__main__":
     bot = ContestBot()
-    asyncio.run(bot.run())
+    try:
+        asyncio.run(bot.run())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен")
