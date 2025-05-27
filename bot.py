@@ -1,261 +1,396 @@
 import logging
 import asyncio
-from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (
+    Message, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    CallbackQuery
+)
 import aiosqlite
 from config import BOT_TOKEN, ADMIN_ID, GROUP_LINK, MAX_PARTICIPANTS
 
+# Настройка логгирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("contest.log"),
-        logging.StreamHandler()
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-class MyBot:
-    def __init__(self):
-        self.bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-        self.dp = Dispatcher()
-        self.username = None
-        self.contest_ended = False
+# Инициализация бота
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher()
 
-    async def init(self):
-        me = await self.bot.get_me()
-        self.username = me.username
-        await self.load_contest_status()
-        return self
+# Глобальные переменные
+CONTEST_ENDED = False
+CURRENT_PARTICIPANTS = 0
 
-    async def load_contest_status(self):
-        try:
-            async with aiosqlite.connect("contest.db") as db:
-                cursor = await db.execute(
-                    "SELECT value FROM contest_settings WHERE key = 'contest_ended'")
-                result = await cursor.fetchone()
-                self.contest_ended = result and result[0] == "true"
-        except Exception as e:
-            logger.error(f"Ошибка загрузки статуса конкурса: {e}")
-            await notify_admin(f"⚠️ Ошибка загрузки статуса конкурса: {e}")
-
+# ================== БАЗА ДАННЫХ ==================
 async def init_db():
-    try:
-        async with aiosqlite.connect("contest.db") as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS participants (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    referrals INTEGER DEFAULT 0,
-                    join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS contest_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT)""")
-            await db.execute(
-                "INSERT OR IGNORE INTO contest_settings (key, value) VALUES (?, ?)",
-                ("contest_ended", "false"))
-            await db.commit()
-    except Exception as e:
-        logger.error(f"Ошибка инициализации БД: {e}")
-        await notify_admin(f"⚠️ Критическая ошибка БД: {e}")
-
-async def safe_db_execute(query, params=()):
-    try:
-        async with aiosqlite.connect("contest.db") as db:
-            await db.execute(query, params)
-            await db.commit()
-            return True
-    except Exception as e:
-        logger.error(f"Ошибка БД: {e}")
-        await notify_admin(f"⚠️ Ошибка БД: {e}")
-        return False
-
-async def check_participants_limit():
-    try:
-        channel_username = GROUP_LINK.split('/')[-1]
-        chat = await bot_instance.bot.get_chat(f"@{channel_username}")
-        current = chat.members_count
+    """Инициализация базы данных"""
+    async with aiosqlite.connect("contest.db") as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS contest_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
         
-        if current >= MAX_PARTICIPANTS and not bot_instance.contest_ended:
-            await end_contest()
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"Ошибка проверки участников: {e}")
-        await notify_admin(f"⚠️ Ошибка проверки участников: {e}")
-        return False
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS participants (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                referrals INTEGER DEFAULT 0,
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                referral_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER,
+                user_id INTEGER UNIQUE,
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (referrer_id) REFERENCES participants(user_id)
+            )
+        """)
+        
+        await db.execute(
+            "INSERT OR IGNORE INTO contest_settings (key, value) VALUES (?, ?)",
+            ("contest_ended", "false")
+        )
+        await db.commit()
+
+async def check_contest_status():
+    """Проверка статуса конкурса"""
+    async with aiosqlite.connect("contest.db") as db:
+        cursor = await db.execute(
+            "SELECT value FROM contest_settings WHERE key = 'contest_ended'"
+        )
+        result = await cursor.fetchone()
+        return result and result[0] == "true"
 
 async def end_contest():
-    if await safe_db_execute(
-        "UPDATE contest_settings SET value = 'true' WHERE key = 'contest_ended'"
-    ):
-        bot_instance.contest_ended = True
-        await notify_admin(
-            f"🏆 Конкурс завершен!\n"
-            f"Участников: {MAX_PARTICIPANTS}\n"
-            f"Время завершения: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    """Завершение конкурса"""
+    async with aiosqlite.connect("contest.db") as db:
+        await db.execute(
+            "UPDATE contest_settings SET value = 'true' WHERE key = 'contest_ended'"
+        )
+        await db.commit()
+    global CONTEST_ENDED
+    CONTEST_ENDED = True
+    await notify_admin("🏆 Конкурс завершен! Достигнут лимит участников!")
+
+async def get_chat_members_count():
+    """Получение количества участников канала (новый метод)"""
+    try:
+        channel_username = GROUP_LINK.replace("https://", "").replace("t.me/", "").replace("@", "")
+        chat = await bot.get_chat(f"@{channel_username}")
+        return chat.members_count
+    except Exception as e:
+        logger.error(f"Ошибка получения количества участников: {e}")
+        return 0
+
+async def check_participants_limit():
+    """Проверка лимита участников"""
+    global CURRENT_PARTICIPANTS, CONTEST_ENDED
+    
+    if CONTEST_ENDED:
+        return True
+        
+    CURRENT_PARTICIPANTS = await get_chat_members_count()
+    
+    if CURRENT_PARTICIPANTS >= MAX_PARTICIPANTS:
+        await end_contest()
+        return True
+        
+    return False
+
+async def add_participant(user: types.User):
+    """Добавление участника"""
+    async with aiosqlite.connect("contest.db") as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO participants 
+               (user_id, username, first_name) 
+               VALUES (?, ?, ?)""",
+            (user.id, user.username, user.first_name)
+        )
+        await db.commit()
+
+async def add_referral(referrer_id: int, user_id: int):
+    """Добавление реферала"""
+    async with aiosqlite.connect("contest.db") as db:
+        await db.execute(
+            "UPDATE participants SET referrals = referrals + 1 WHERE user_id = ?",
+            (referrer_id,)
+        )
+        await db.execute(
+            """INSERT OR IGNORE INTO referrals 
+               (referrer_id, user_id) 
+               VALUES (?, ?)""",
+            (referrer_id, user_id)
+        )
+        await db.commit()
+
+async def get_user_stats(user_id: int) -> dict:
+    """Получение статистики пользователя"""
+    async with aiosqlite.connect("contest.db") as db:
+        cursor = await db.execute(
+            """SELECT referrals FROM participants 
+               WHERE user_id = ?""",
+            (user_id,)
+        )
+        result = await cursor.fetchone()
+        return {"referrals": result[0] if result else 0}
+
+async def get_top_referrers(limit: int = 5) -> list:
+    """Получение топа участников"""
+    async with aiosqlite.connect("contest.db") as db:
+        cursor = await db.execute(
+            """SELECT p.user_id, p.username, p.first_name, p.referrals 
+               FROM participants p
+               ORDER BY p.referrals DESC 
+               LIMIT ?""",
+            (limit,)
+        )
+        return await cursor.fetchall()
+
+async def is_user_subscribed(user_id: int) -> bool:
+    """Проверка подписки на канал"""
+    try:
+        channel_username = GROUP_LINK.replace("https://", "").replace("t.me/", "").replace("@", "")
+        chat_member = await bot.get_chat_member(
+            chat_id=f"@{channel_username}",
+            user_id=user_id
+        )
+        return chat_member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        logger.error(f"Ошибка проверки подписки: {e}")
+        return False
+
+# ================== КЛАВИАТУРЫ ==================
+def get_subscribe_keyboard():
+    """Клавиатура для подписки"""
+    channel_username = GROUP_LINK.replace("https://", "").replace("t.me/", "").replace("@", "")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подписаться на канал", 
+                    url=f"https://t.me/{channel_username}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔁 Проверить подписку", 
+                    callback_data="check_sub"
+                )
+            ]
+        ]
+    )
+
+def get_main_keyboard():
+    """Основная клавиатура"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Моя статистика", callback_data="my_stats"),
+                InlineKeyboardButton(text="🏆 Топ участников", callback_data="top_list")
+            ],
+            [
+                InlineKeyboardButton(text="👥 Пригласить друзей", switch_inline_query="Присоединяйся к конкурсу!")
+            ]
+        ]
+    )
+
+# ================== ОБРАБОТЧИКИ ==================
+@dp.message(Command("start"))
+async def start(message: Message):
+    """Обработка команды /start"""
+    try:
+        if await check_participants_limit():
+            await message.answer(
+                "🏆 Конкурс завершен!\n\n"
+                f"Мы достигли максимального количества участников - {MAX_PARTICIPANTS}!\n"
+                "Результаты будут объявлены в ближайшее время.\n\n"
+                "Спасибо за участие! ❤️"
+            )
+            return
+
+        user = message.from_user
+        await add_participant(user)
+
+        args = message.text.split()
+        if len(args) > 1 and args[1].startswith("ref"):
+            referrer_id = int(args[1][3:])
+            if referrer_id != user.id:
+                await add_referral(referrer_id, user.id)
+                await bot.send_message(
+                    referrer_id,
+                    f"🎉 Новый реферал: {user.first_name}!\n"
+                    f"Теперь у вас {(await get_user_stats(referrer_id))['referrals']} приглашений!"
+                )
+
+        if not await is_user_subscribed(user.id):
+            await message.answer(
+                "📢 Для участия в конкурсе необходимо подписаться на наш канал!\n\n"
+                f"Осталось свободных мест: {MAX_PARTICIPANTS - CURRENT_PARTICIPANTS}",
+                reply_markup=get_subscribe_keyboard()
+            )
+            return
+
+        bot_username = (await bot.me()).username
+        ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
+        
+        await message.answer(
+            f"🏡 <b>Розыгрыш акций ПИК!</b>\n\n"
+            f"🔗 <b>Ваша реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
+            f"🏆 <b>Призовой фонд:</b>\n"
+            f"🥇 1 место: 3 акции ПИК (~1,050 руб)\n"
+            f"🥈 2 место: 2 акции ПИК (~700 руб)\n"
+            f"🥉 3 место: 1 акция ПИК (~350 руб)\n\n"
+            f"📌 <b>Как увеличить шансы:</b>\n"
+            f"• Приглашайте друзей по своей ссылке\n"
+            f"• Каждый реферал = +1 балл\n\n"
+            f"⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - CURRENT_PARTICIPANTS}\n"
+            f"📅 <b>Итоги конкурса:</b> При достижении {MAX_PARTICIPANTS} участников",
+            reply_markup=get_main_keyboard()
         )
 
-async def scheduled_checker():
-    while True:
-        try:
-            if not bot_instance.contest_ended:
-                if await check_participants_limit():
-                    break
-            await asyncio.sleep(1800)
-        except Exception as e:
-            logger.error(f"Ошибка в scheduled_checker: {e}")
-            await asyncio.sleep(300)
-
-async def get_stats():
-    try:
-        async with aiosqlite.connect("contest.db") as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM participants")
-            total = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute("""
-                SELECT username, first_name, referrals 
-                FROM participants 
-                ORDER BY referrals DESC 
-                LIMIT 5""")
-            top = await cursor.fetchall()
-            
-            cursor = await db.execute(
-                "SELECT value FROM contest_settings WHERE key = 'contest_ended'")
-            status = "завершен" if (await cursor.fetchone())[0] == "true" else "активен"
-            
-            return total, top, status
     except Exception as e:
-        logger.error(f"Ошибка получения статистики: {e}")
-        await notify_admin(f"⚠️ Ошибка получения статистики: {e}")
-        return 0, [], "неизвестен"
+        logger.error(f"Ошибка в /start: {e}")
+        await message.answer("⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
 
-async def notify_admin(message: str):
+@dp.callback_query(F.data == "check_sub")
+async def check_subscription(callback_query: CallbackQuery):
+    """Проверка подписки"""
     try:
-        await bot_instance.bot.send_message(ADMIN_ID, message)
-        logger.info(f"Уведомление отправлено админу: {message}")
+        user = callback_query.from_user
+        
+        if await is_user_subscribed(user.id):
+            await callback_query.message.edit_reply_markup(reply_markup=None)
+            bot_username = (await bot.me()).username
+            ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
+            
+            await callback_query.message.answer(
+                f"✅ <b>{user.first_name}, вы успешно подписаны!</b>\n\n"
+                "Теперь вы можете участвовать в конкурсе.\n\n"
+                f"🔗 Ваша реферальная ссылка:\n{ref_link}",
+                reply_markup=get_main_keyboard()
+            )
+            await callback_query.answer()
+        else:
+            await callback_query.answer(
+                "❌ Вы не подписаны на канал!\n\n"
+                "1. Нажмите кнопку 'Подписаться на канал'\n"
+                "2. Подпишитесь на канал\n"
+                "3. Вернитесь в бот и нажмите 'Проверить подписку'",
+                show_alert=True
+            )
+    except Exception as e:
+        logger.error(f"Ошибка проверки подписки: {e}")
+        await callback_query.answer(
+            "⚠️ Ошибка проверки подписки. Пожалуйста, попробуйте позже.",
+            show_alert=True
+        )
+
+@dp.callback_query(F.data == "my_stats")
+async def show_stats(callback_query: CallbackQuery):
+    """Показать статистику"""
+    try:
+        stats = await get_user_stats(callback_query.from_user.id)
+        bot_username = (await bot.me()).username
+        ref_link = f"https://t.me/{bot_username}?start=ref{callback_query.from_user.id}"
+        
+        await callback_query.message.answer(
+            f"📊 <b>Ваша статистика:</b>\n\n"
+            f"👤 ID: <code>{callback_query.from_user.id}</code>\n"
+            f"👥 Приглашено друзей: <b>{stats['referrals']}</b>\n"
+            f"🏆 Место в рейтинге: <b>В процессе...</b>\n\n"
+            f"🔗 <b>Реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
+            f"⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - CURRENT_PARTICIPANTS}",
+            reply_markup=get_main_keyboard()
+        )
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Ошибка показа статистики: {e}")
+        await callback_query.answer("⚠️ Ошибка получения статистики", show_alert=True)
+
+@dp.callback_query(F.data == "top_list")
+async def show_top(callback_query: CallbackQuery):
+    """Показать топ участников"""
+    try:
+        top_users = await get_top_referrers()
+        text = "🏆 <b>Топ участников:</b>\n\n"
+        
+        if top_users:
+            for i, (uid, username, first_name, refs) in enumerate(top_users, 1):
+                name = f"@{username}" if username else first_name
+                text += f"{i}. {name}: <b>{refs}</b> рефералов\n"
+        else:
+            text = "Пока нет данных о участниках."
+            
+        text += f"\n⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - CURRENT_PARTICIPANTS}"
+        
+        await callback_query.message.answer(
+            text,
+            reply_markup=get_main_keyboard()
+        )
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Ошибка показа топа: {e}")
+        await callback_query.answer("⚠️ Ошибка получения топа", show_alert=True)
+
+# ================== УВЕДОМЛЕНИЯ ==================
+async def notify_admin(message: str):
+    """Уведомление администратора"""
+    try:
+        await bot.send_message(ADMIN_ID, message)
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления админу: {e}")
 
-def get_keyboards():
-    channel_username = GROUP_LINK.split('/')[-1]
-    subscribe_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подписаться", url=f"https://t.me/{channel_username}")],
-        [InlineKeyboardButton(text="🔁 Проверить", callback_data="check_sub")]
-    ])
-    main_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="my_stats")],
-        [InlineKeyboardButton(text="👥 Пригласить", switch_inline_query="Присоединяйся!")]
-    ])
-    return subscribe_kb, main_kb
+async def scheduled_check():
+    """Периодическая проверка количества участников"""
+    while True:
+        try:
+            if not CONTEST_ENDED:
+                if await check_participants_limit():
+                    break
+            await asyncio.sleep(3600)
+        except Exception as e:
+            logger.error(f"Ошибка в scheduled_check: {e}")
+            await asyncio.sleep(600)
+
+# ================== ЗАПУСК БОТА ==================
+async def on_startup():
+    """Действия при запуске"""
+    await init_db()
+    asyncio.create_task(scheduled_check())
+    await notify_admin(
+        f"🤖 Бот успешно запущен!\n\n"
+        f"🔗 Ссылка на канал: {GROUP_LINK}\n"
+        f"👥 Текущее количество участников: {await get_chat_members_count()}\n"
+        f"🏆 Лимит участников: {MAX_PARTICIPANTS}"
+    )
+
+async def on_shutdown():
+    """Действия при выключении"""
+    await notify_admin("🔴 Бот выключается...")
 
 async def main():
-    global bot_instance
-    bot_instance = await MyBot().init()
-    dp = bot_instance.dp
-    
-    @dp.message(Command("stats"))
-    async def admin_stats(message: Message):
-        if message.from_user.id != ADMIN_ID:
-            await message.answer("🚫 Доступ запрещен!")
-            return
-        
-        total, top, status = await get_stats()
-        text = (
-            f"📊 Статистика конкурса:\n\n"
-            f"🏁 Статус: {status}\n"
-            f"👥 Всего участников: {total}\n"
-            f"🏆 Топ рефералов:\n"
-        )
-        
-        for i, (username, name, refs) in enumerate(top, 1):
-            text += f"{i}. {username or name}: {refs}\n"
-        
-        await message.answer(text)
-
-    @dp.message(Command("start"))
-    async def start(message: Message):
-        try:
-            if bot_instance.contest_ended:
-                await message.answer("🏆 Конкурс завершен! Спасибо за участие!")
-                return
-
-            user = message.from_user
-            
-            if not await safe_db_execute(
-                "INSERT OR IGNORE INTO participants (user_id, username, first_name) VALUES (?, ?, ?)",
-                (user.id, user.username, user.first_name)
-            ):
-                await message.answer("⚠️ Ошибка регистрации. Попробуйте позже.")
-                return
-
-            args = message.text.split()
-            if len(args) > 1 and args[1].startswith("ref"):
-                referrer_id = int(args[1][3:])
-                if referrer_id != user.id:
-                    if await safe_db_execute(
-                        "UPDATE participants SET referrals = referrals + 1 WHERE user_id = ?",
-                        (referrer_id,)
-                    ):
-                        await notify_admin(f"🎉 Новый реферал: {user.first_name} (@{user.username})")
-
-            subscribe_kb, main_kb = get_keyboards()
-            
-            if not await is_user_subscribed(user.id):
-                await message.answer("📢 Для участия подпишитесь на канал!", 
-                                  reply_markup=subscribe_kb)
-                return
-                
-            ref_link = f"https://t.me/{bot_instance.username}?start=ref{user.id}"
-            await message.answer(
-                f"🎉 Добро пожаловать в конкурс!\n\n"
-                f"🔗 Ваша реферальная ссылка:\n<code>{ref_link}</code>",
-                reply_markup=main_kb)
-                
-        except Exception as e:
-            logger.error(f"Ошибка в /start: {e}")
-            await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
-
-    @dp.callback_query(F.data == "check_sub")
-    async def check_sub(callback_query: CallbackQuery):
-        try:
-            user = callback_query.from_user
-            _, main_kb = get_keyboards()
-            
-            if await is_user_subscribed(user.id):
-                await callback_query.message.edit_reply_markup(reply_markup=None)
-                await callback_query.message.answer(
-                    f"✅ {user.first_name}, вы подписаны!",
-                    reply_markup=main_kb)
-                await callback_query.answer()
-            else:
-                await callback_query.answer("❌ Вы не подписаны!", show_alert=True)
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            await callback_query.answer("⚠️ Ошибка", show_alert=True)
-
-    @dp.callback_query(F.data == "my_stats")
-    async def show_stats(callback_query: CallbackQuery):
-        try:
-            stats = await get_user_stats(callback_query.from_user.id)
-            await callback_query.message.answer(
-                f"📊 Ваши рефералы: <b>{stats['referrals']}</b>")
-            await callback_query.answer()
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            await callback_query.answer("⚠️ Ошибка", show_alert=True)
-
-    await init_db()
-    asyncio.create_task(scheduled_checker())
-    await notify_admin(f"🤖 Бот запущен!\nВремя: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-    await dp.start_polling(bot_instance.bot)
+    """Основная функция"""
+    await on_startup()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await on_shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
