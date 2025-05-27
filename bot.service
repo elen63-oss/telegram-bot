@@ -1,4 +1,3 @@
-sudo cat > /etc/systemd/system/bot.service <<EOL
 [Unit]
 Description=Telegram Bot
 After=network.target
@@ -13,4 +12,3 @@ Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
-EOL
