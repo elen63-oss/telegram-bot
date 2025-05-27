@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import Command
 from aiogram.types import (
     Message, 
@@ -28,35 +28,48 @@ dp = Dispatcher()
 CONTEST_ENDED = False
 CURRENT_PARTICIPANTS = 0
 
+def extract_channel_username():
+    """Извлекаем username канала из GROUP_LINK"""
+    if GROUP_LINK.startswith("https://t.me/"):
+        return GROUP_LINK.split('/')[-1].replace('@', '')
+    elif GROUP_LINK.startswith("@"):
+        return GROUP_LINK[1:]
+    return GROUP_LINK.replace('@', '')
+
 async def get_channel_info():
-    """Получение информации о канале"""
+    """Получение полной информации о канале"""
     try:
-        if GROUP_LINK.startswith("https://t.me/"):
-            channel_username = GROUP_LINK.split('/')[-1]
-        elif GROUP_LINK.startswith("@"):
-            channel_username = GROUP_LINK[1:]
-        else:
-            channel_username = GROUP_LINK
-            
-        chat = await bot.get_chat(f"@{channel_username}")
-        members_count = await bot.get_chat_members_count(chat.id)
-        return {
+        username = extract_channel_username()
+        chat = await bot.get_chat(f"@{username}")
+        
+        info = {
             'chat_id': chat.id,
-            'username': channel_username,
-            'members_count': members_count
+            'username': username,
+            'type': chat.type
         }
+        
+        # Для публичных каналов
+        if hasattr(chat, 'members_count'):
+            info['members_count'] = chat.members_count
+        # Для приватных каналов
+        else:
+            info['members_count'] = await bot.get_chat_member_count(chat.id)
+            
+        return info
+        
     except Exception as e:
-        logger.error(f"Ошибка получения информации о канале: {e}")
-        await notify_admin(f"Ошибка доступа к каналу: {e}")
+        error_msg = f"Ошибка доступа к каналу: {str(e)}"
+        logger.error(error_msg)
+        await notify_admin(error_msg)
         return None
 
 async def get_chat_members_count():
-    """Получение количества участников канала"""
+    """Безопасное получение количества участников"""
     channel_info = await get_channel_info()
-    return channel_info['members_count'] if channel_info else 0
+    return channel_info.get('members_count', 0) if channel_info else 0
 
 async def is_user_subscribed(user_id: int) -> bool:
-    """Проверка подписки пользователя на канал"""
+    """Проверка подписки пользователя"""
     try:
         channel_info = await get_channel_info()
         if not channel_info:
@@ -65,7 +78,7 @@ async def is_user_subscribed(user_id: int) -> bool:
         member = await bot.get_chat_member(channel_info['chat_id'], user_id)
         return member.status in ['member', 'administrator', 'creator']
     except Exception as e:
-        logger.error(f"Ошибка проверки подписки: {e}")
+        logger.error(f"Ошибка проверки подписки: {str(e)}")
         return False
 
 async def init_db():
@@ -77,7 +90,6 @@ async def init_db():
                 value TEXT
             )
         """)
-        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS participants (
                 user_id INTEGER PRIMARY KEY,
@@ -87,7 +99,6 @@ async def init_db():
                 join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS referrals (
                 referral_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,7 +108,6 @@ async def init_db():
                 FOREIGN KEY (referrer_id) REFERENCES participants(user_id)
             )
         """)
-        
         await db.execute(
             "INSERT OR IGNORE INTO contest_settings (key, value) VALUES (?, ?)",
             ("contest_ended", "false")
@@ -190,16 +200,13 @@ async def get_top_referrers(limit: int = 5) -> list:
 
 def get_subscribe_keyboard():
     """Клавиатура для подписки"""
-    channel_info = asyncio.run(get_channel_info())
-    if not channel_info:
-        return None
-        
+    username = extract_channel_username()
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Подписаться на канал", 
-                    url=f"https://t.me/{channel_info['username']}"
+                    url=f"https://t.me/{username}"
                 )
             ],
             [
@@ -233,29 +240,95 @@ async def notify_admin(message: str):
     try:
         await bot.send_message(ADMIN_ID, message)
     except Exception as e:
-        logger.error(f"Ошибка отправки уведомления админу: {e}")
+        logger.error(f"Ошибка отправки уведомления админу: {str(e)}")
 
-# [Остальные обработчики остаются без изменений]
-# ... (добавьте свои обработчики команд и callback'ов)
+# Обработчики команд
+@dp.message(Command("start"))
+async def start(message: Message):
+    """Обработка команды /start"""
+    try:
+        if await check_participants_limit():
+            await message.answer(
+                "🏆 Конкурс завершен!\n\n"
+                f"Мы достигли максимального количества участников - {MAX_PARTICIPANTS}!\n"
+                "Результаты будут объявлены в ближайшее время.\n\n"
+                "Спасибо за участие! ❤️"
+            )
+            return
+
+        user = message.from_user
+        await add_participant(user)
+
+        # Обработка реферальной ссылки
+        args = message.text.split()
+        if len(args) > 1 and args[1].startswith("ref"):
+            referrer_id = int(args[1][3:])
+            if referrer_id != user.id:
+                await add_referral(referrer_id, user.id)
+                await bot.send_message(
+                    referrer_id,
+                    f"🎉 Новый реферал: {user.first_name}!\n"
+                    f"Теперь у вас {(await get_user_stats(referrer_id))['referrals']} приглашений!"
+                )
+
+        if not await is_user_subscribed(user.id):
+            await message.answer(
+                "📢 Для участия в конкурсе необходимо подписаться на наш канал!\n\n"
+                f"Осталось свободных мест: {MAX_PARTICIPANTS - CURRENT_PARTICIPANTS}",
+                reply_markup=get_subscribe_keyboard()
+            )
+            return
+
+        bot_username = (await bot.me()).username
+        ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
+        
+        await message.answer(
+            f"🏡 <b>Розыгрыш акций ПИК!</b>\n\n"
+            f"🔗 <b>Ваша реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
+            f"🏆 <b>Призовой фонд:</b>\n"
+            f"🥇 1 место: 3 акции ПИК (~1,050 руб)\n"
+            f"🥈 2 место: 2 акции ПИК (~700 руб)\n"
+            f"🥉 3 место: 1 акция ПИК (~350 руб)\n\n"
+            f"📌 <b>Как увеличить шансы:</b>\n"
+            f"• Приглашайте друзей по своей ссылке\n"
+            f"• Каждый реферал = +1 балл\n\n"
+            f"⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - CURRENT_PARTICIPANTS}\n"
+            f"📅 <b>Итоги конкурса:</b> При достижении {MAX_PARTICIPANTS} участников",
+            reply_markup=get_main_keyboard()
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка в /start: {str(e)}")
+        await message.answer("⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
+
+[ДОБАВЬТЕ ОСТАЛЬНЫЕ ОБРАБОТЧИКИ CALLBACK_QUERY]
 
 async def on_startup():
     """Действия при запуске"""
     try:
-        await init_db()
-        
         # Проверка подключения к каналу
         channel_info = await get_channel_info()
         if not channel_info:
             raise Exception("Не удалось подключиться к каналу!")
-            
+        
+        # Проверка прав бота
+        bot_user = await bot.get_me()
+        member = await bot.get_chat_member(channel_info['chat_id'], bot_user.id)
+        if member.status not in ['administrator', 'creator']:
+            raise Exception("Бот не является администратором канала!")
+        
+        await init_db()
+        
         await notify_admin(
-            f"🤖 Бот успешно запущен!\n"
-            f"📢 Канал: @{channel_info['username']}\n"
-            f"👥 Участников: {channel_info['members_count']}\n"
+            "🤖 Бот успешно запущен!\n\n"
+            f"📢 Канал: {GROUP_LINK}\n"
+            f"👥 Участников: {await get_chat_members_count()}\n"
             f"🏆 Лимит: {MAX_PARTICIPANTS}"
         )
     except Exception as e:
-        logger.error(f"Ошибка при запуске: {e}")
+        error_msg = f"Ошибка при запуске: {str(e)}"
+        logger.error(error_msg)
+        await notify_admin(error_msg)
         raise
 
 async def on_shutdown():
