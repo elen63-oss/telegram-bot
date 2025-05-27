@@ -1,4 +1,4 @@
-cat <<EOF | sudo tee /etc/systemd/system/bot.service
+sudo cat > /etc/systemd/system/bot.service <<EOL
 [Unit]
 Description=Telegram Bot
 After=network.target
@@ -6,10 +6,10 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=/root/telegram-bot
-ExecStart=/root/telegram-bot/venv/bin/python /root/telegram-bot/bot.py
+ExecStart=/usr/bin/python3 /root/telegram-bot/bot.py
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOL
