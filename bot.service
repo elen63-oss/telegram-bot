@@ -6,7 +6,7 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=/root/telegram-bot
-ExecStart=/usr/bin/python3 /root/telegram-bot/bot.py
+ExecStart=/root/telegram-bot/venv/bin/python /root/telegram-bot/bot.py
 Restart=always
 RestartSec=10
 
