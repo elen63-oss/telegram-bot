@@ -37,36 +37,66 @@ def extract_channel_username():
     return GROUP_LINK.replace('@', '')
 
 async def get_channel_info():
-    """Получение полной информации о канале"""
+    """Универсальный метод получения информации о канале"""
     try:
         username = extract_channel_username()
         chat = await bot.get_chat(f"@{username}")
         
-        info = {
-            'chat_id': chat.id,
-            'username': username,
-            'type': chat.type
-        }
-        
-        # Для публичных каналов
-        if hasattr(chat, 'members_count'):
-            info['members_count'] = chat.members_count
-        # Для приватных каналов
+        # Для supergroups и channels
+        if chat.type in [ChatType.CHANNEL, ChatType.SUPERGROUP]:
+            try:
+                members_count = await bot.get_chat_member_count(chat.id)
+                return {
+                    'chat_id': chat.id,
+                    'username': username,
+                    'type': chat.type,
+                    'members_count': members_count
+                }
+            except Exception as e:
+                logger.error(f"Ошибка получения количества участников: {str(e)}")
+                return None
         else:
-            info['members_count'] = await bot.get_chat_member_count(chat.id)
+            logger.error("Указанный чат не является каналом или супергруппой")
+            return None
             
-        return info
-        
     except Exception as e:
-        error_msg = f"Ошибка доступа к каналу: {str(e)}"
+        error_msg = f"Критическая ошибка доступа к каналу: {str(e)}"
         logger.error(error_msg)
         await notify_admin(error_msg)
         return None
 
 async def get_chat_members_count():
-    """Безопасное получение количества участников"""
-    channel_info = await get_channel_info()
-    return channel_info.get('members_count', 0) if channel_info else 0
+    """Альтернативный метод подсчета участников"""
+    try:
+        channel_info = await get_channel_info()
+        if not channel_info:
+            return 0
+            
+        # Попробуем несколько методов получения количества
+        try:
+            # Метод 1: через get_chat_member_count
+            count = await bot.get_chat_member_count(channel_info['chat_id'])
+            logger.info(f"Участников (метод 1): {count}")
+            return count
+        except Exception as e:
+            logger.warning(f"Метод 1 не сработал: {str(e)}")
+            
+        try:
+            # Метод 2: для публичных каналов
+            chat = await bot.get_chat(channel_info['chat_id'])
+            if hasattr(chat, 'members_count'):
+                logger.info(f"Участников (метод 2): {chat.members_count}")
+                return chat.members_count
+        except Exception as e:
+            logger.warning(f"Метод 2 не сработал: {str(e)}")
+            
+        # Если оба метода не сработали
+        logger.error("Не удалось получить количество участников")
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Фатальная ошибка при подсчете участников: {str(e)}")
+        return 0
 
 async def is_user_subscribed(user_id: int) -> bool:
     """Проверка подписки пользователя"""
@@ -301,34 +331,122 @@ async def start(message: Message):
         logger.error(f"Ошибка в /start: {str(e)}")
         await message.answer("⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
 
-[ДОБАВЬТЕ ОСТАЛЬНЫЕ ОБРАБОТЧИКИ CALLBACK_QUERY]
+@dp.callback_query(F.data == "check_sub")
+async def check_subscription(callback_query: CallbackQuery):
+    """Проверка подписки на канал"""
+    try:
+        user = callback_query.from_user
+        
+        if await is_user_subscribed(user.id):
+            await callback_query.message.edit_reply_markup(reply_markup=None)
+            bot_username = (await bot.me()).username
+            ref_link = f"https://t.me/{bot_username}?start=ref{user.id}"
+            
+            await callback_query.message.answer(
+                f"✅ <b>{user.first_name}, вы успешно подписаны!</b>\n\n"
+                "Теперь вы можете участвовать в конкурсе.\n\n"
+                f"🔗 Ваша реферальная ссылка:\n{ref_link}",
+                reply_markup=get_main_keyboard()
+            )
+            await callback_query.answer()
+        else:
+            await callback_query.answer(
+                "❌ Вы не подписаны на канал!\n\n"
+                "1. Нажмите кнопку 'Подписаться на канал'\n"
+                "2. Подпишитесь на канал\n"
+                "3. Вернитесь в бот и нажмите 'Проверить подписку'",
+                show_alert=True
+            )
+    except Exception as e:
+        logger.error(f"Ошибка проверки подписки: {str(e)}")
+        await callback_query.answer(
+            "⚠️ Ошибка проверки подписки. Пожалуйста, попробуйте позже.",
+            show_alert=True
+        )
+
+@dp.callback_query(F.data == "my_stats")
+async def show_stats(callback_query: CallbackQuery):
+    """Показать статистику пользователя"""
+    try:
+        stats = await get_user_stats(callback_query.from_user.id)
+        bot_username = (await bot.me()).username
+        ref_link = f"https://t.me/{bot_username}?start=ref{callback_query.from_user.id}"
+        
+        await callback_query.message.answer(
+            f"📊 <b>Ваша статистика:</b>\n\n"
+            f"👤 ID: <code>{callback_query.from_user.id}</code>\n"
+            f"👥 Приглашено друзей: <b>{stats['referrals']}</b>\n"
+            f"🏆 Место в рейтинге: <b>В процессе...</b>\n\n"
+            f"🔗 <b>Реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
+            f"⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - CURRENT_PARTICIPANTS}",
+            reply_markup=get_main_keyboard()
+        )
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Ошибка показа статистики: {str(e)}")
+        await callback_query.answer("⚠️ Ошибка получения статистики", show_alert=True)
+
+@dp.callback_query(F.data == "top_list")
+async def show_top(callback_query: CallbackQuery):
+    """Показать топ участников"""
+    try:
+        top_users = await get_top_referrers()
+        text = "🏆 <b>Топ участников:</b>\n\n"
+        
+        if top_users:
+            for i, (uid, username, first_name, refs) in enumerate(top_users, 1):
+                name = f"@{username}" if username else first_name
+                text += f"{i}. {name}: <b>{refs}</b> рефералов\n"
+        else:
+            text = "Пока нет данных о участниках."
+            
+        text += f"\n⏳ <b>Осталось мест:</b> {MAX_PARTICIPANTS - CURRENT_PARTICIPANTS}"
+        
+        await callback_query.message.answer(
+            text,
+            reply_markup=get_main_keyboard()
+        )
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Ошибка показа топа: {str(e)}")
+        await callback_query.answer("⚠️ Ошибка получения топа", show_alert=True)
 
 async def on_startup():
     """Действия при запуске"""
     try:
-        # Проверка подключения к каналу
+        # Проверка подключения к API
+        me = await bot.get_me()
+        logger.info(f"Бот @{me.username} успешно подключен к API")
+
+        # Проверка канала
         channel_info = await get_channel_info()
         if not channel_info:
-            raise Exception("Не удалось подключиться к каналу!")
-        
+            error_msg = "Не удалось получить информацию о канале. Проверьте ссылку и права бота."
+            logger.error(error_msg)
+            await notify_admin(error_msg)
+            raise Exception(error_msg)
+
         # Проверка прав бота
-        bot_user = await bot.get_me()
-        member = await bot.get_chat_member(channel_info['chat_id'], bot_user.id)
-        if member.status not in ['administrator', 'creator']:
-            raise Exception("Бот не является администратором канала!")
-        
+        bot_member = await bot.get_chat_member(channel_info['chat_id'], me.id)
+        if bot_member.status not in ['administrator', 'creator']:
+            error_msg = "Бот не является администратором канала!"
+            logger.error(error_msg)
+            await notify_admin(error_msg)
+            raise Exception(error_msg)
+
+        # Инициализация БД
         await init_db()
         
+        # Уведомление админа
+        members_count = await get_chat_members_count()
         await notify_admin(
             "🤖 Бот успешно запущен!\n\n"
             f"📢 Канал: {GROUP_LINK}\n"
-            f"👥 Участников: {await get_chat_members_count()}\n"
+            f"👥 Участников: {members_count}\n"
             f"🏆 Лимит: {MAX_PARTICIPANTS}"
         )
     except Exception as e:
-        error_msg = f"Ошибка при запуске: {str(e)}"
-        logger.error(error_msg)
-        await notify_admin(error_msg)
+        logger.error(f"Ошибка при запуске: {str(e)}")
         raise
 
 async def on_shutdown():
