@@ -1,7 +1,7 @@
+cat > /root/telegram-bot/bot.py <<'EOL'
 import logging
 import asyncio
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (
@@ -16,15 +16,13 @@ from config import BOT_TOKEN, ADMIN_ID, GROUP_LINK, MAX_PARTICIPANTS
 # Настройка логгирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    filename="bot.log"
 )
 logger = logging.getLogger(__name__)
 
 # Инициализация бота
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 # Глобальные переменные
@@ -89,11 +87,11 @@ async def end_contest():
     await notify_admin("🏆 Конкурс завершен! Достигнут лимит участников!")
 
 async def get_chat_members_count():
-    """Получение количества участников канала (новый метод)"""
+    """Получение количества участников канала"""
     try:
-        channel_username = GROUP_LINK.replace("https://", "").replace("t.me/", "").replace("@", "")
+        channel_username = GROUP_LINK.split('/')[-1].replace('@', '')
         chat = await bot.get_chat(f"@{channel_username}")
-        return chat.members_count
+        return await bot.get_chat_member_count(chat.id)
     except Exception as e:
         logger.error(f"Ошибка получения количества участников: {e}")
         return 0
