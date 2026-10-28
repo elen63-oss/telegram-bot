@@ -1,11 +1,16 @@
 import logging
 import asyncio
+import html
+import time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import aiosqlite
 from config import BOT_TOKEN, ADMIN_ID, GROUP_LINK, MAX_PARTICIPANTS
+from llm import ask_llm
+
+ASK_COOLDOWN = 15  # секунд между запросами /ask от одного пользователя
 
 # Настройка логгирования
 logging.basicConfig(
@@ -22,6 +27,7 @@ class ContestBot:
         self.contest_ended = False
         self.current_participants = 0
         self.channel_info = None
+        self.last_ask = {}
 
     async def initialize(self):
         """Инициализация бота"""
@@ -313,6 +319,29 @@ class ContestBot:
             except Exception as e:
                 logger.error(f"Ошибка показа топа: {str(e)}")
                 await callback_query.answer("Ошибка топа", show_alert=True)
+
+        @self.dp.message(Command("ask"))
+        async def ask(message: Message):
+            try:
+                parts = message.text.split(maxsplit=1)
+                if len(parts) < 2:
+                    await message.answer("Использование: /ask ваш вопрос")
+                    return
+
+                user_id = message.from_user.id
+                wait = ASK_COOLDOWN - (time.monotonic() - self.last_ask.get(user_id, 0))
+                if wait > 0:
+                    await message.answer(f"Подождите {int(wait) + 1} сек.")
+                    return
+                self.last_ask[user_id] = time.monotonic()
+
+                await self.bot.send_chat_action(message.chat.id, "typing")
+                answer = await ask_llm(parts[1])
+                for i in range(0, len(answer), 3500):
+                    await message.answer(html.escape(answer[i:i + 3500]))
+            except Exception as e:
+                logger.error(f"Ошибка в /ask: {str(e)}")
+                await message.answer("ИИ сейчас недоступен, попробуйте позже")
 
     async def run(self):
         """Запуск бота"""

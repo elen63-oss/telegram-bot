@@ -9,6 +9,10 @@ ExecStart=/usr/bin/python3 /root/telegram-bot/bot.py
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
+# Ключи LLM для /ask (хотя бы один):
+#Environment=OPENROUTER_API_KEY=...
+#Environment=GROQ_API_KEY=...
+#Environment=GEMINI_API_KEY=...
 
 # Ограничения ресурсов
 MemoryLimit=256M
